@@ -1,0 +1,19 @@
+# --- Security (CRITICAL) ---
+.env
+config.json
+*.session
+*.session-journal
+*.pem                 
+id_rsa                
+id_rsa.pub
+
+# --- Python & System ---
+__pycache__/
+*.pyc
+venv/
+env/
+.DS_Store
+
+# --- Bot Logs & Data ---
+*.log
+crypto_data.db        
