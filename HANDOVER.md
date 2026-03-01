@@ -184,30 +184,36 @@ Deploying on Oracle Cloud (OCI) is similar to AWS but follows a different naming
     *   If Oracle Linux: `ssh -i <private_key> opc@<public_ip>`
 2.  **Oracle Linux (OPC) Server Preparation**:
     ```bash
-    # Update system
     sudo dnf update -y
-    # Install Python, Pip, Git, and Screen
     sudo dnf install python3 python3-pip git screen -y
     ```
-3.  **OCI Firewall Fix (CRITICAL)**:
-    Oracle Linux has its own firewall management. Run these on the server:
+3.  **OCI Secured Firewall (REQUIRED)**:
+    Do **NOT** leave your firewall wide open. Use these commands to allow only what's necessary:
     ```bash
-    # Open all outbound and reset local rules for bot traffic
-    sudo iptables -F
-    sudo iptables -X
-    sudo iptables -t nat -F
-    sudo iptables -t nat -X
-    sudo iptables -t mangle -F
-    sudo iptables -t mangle -X
-    sudo iptables -P INPUT ACCEPT
-    sudo iptables -P FORWARD ACCEPT
-    sudo iptables -P OUTPUT ACCEPT
-    
-    # Save for Oracle Linux (using iptables-services)
+    # 1. Install iptables-services
     sudo dnf install iptables-services -y
-    sudo systemctl enable iptables
+    
+    # 2. Reset to a safe baseline
+    sudo iptables -F
+    sudo iptables -P INPUT DROP
+    sudo iptables -P FORWARD DROP
+    sudo iptables -P OUTPUT ACCEPT # Allow the bot to talk to APIs
+    
+    # 3. Allow established connections (Critical for return traffic)
+    sudo iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # 4. Allow Loopback (Internal communication)
+    sudo iptables -A INPUT -i lo -j ACCEPT
+    
+    # 5. Allow SSH (Port 22) - Change this to your specific IP if possible
+    sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+    
+    # 6. Save and Enable
     sudo service iptables save
+    sudo systemctl enable iptables
+    sudo systemctl restart iptables
     ```
+    *Note: If you run OpenClaw or other services, only open the specific ports they require (e.g., 8000 for a web UI).*
 
 ### 4. Bot Setup & Persistence
 Follow the **Project Setup** and **Running the Bot** steps from the EC2 guide above. Note: use `dnf` instead of `apt` for any package installs.
