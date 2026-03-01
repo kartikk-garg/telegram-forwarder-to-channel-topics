@@ -1,6 +1,8 @@
 # --- Security (CRITICAL) ---
 .env
 config.json
+service.json
+data.json
 *.session
 *.session-journal
 *.pem                 
