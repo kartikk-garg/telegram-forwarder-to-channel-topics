@@ -1,12 +1,25 @@
+"""
+Forwarder — Thin Orchestrator (V2)
+Listens for Telegram messages, detects token CAs, enriches with full
+Solana Tracker + DexScreener data, logs to DB, forwards formatted messages.
+
+All business logic lives in execution/.
+"""
+
 import os
 import json
 import re
-import requests
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaWebPage
 
-# 1. Load CONFIG
+# --- Execution Layer ---
+from execution.fetch_dexscreener import search_token
+from execution.fetch_solana_tracker import get_full_token_data
+from execution.db_operations import get_connection, insert_call
+from execution.format_message import build_call_message
+
+# --- CONFIG ---
 load_dotenv()
 api_id = int(os.getenv('API_ID'))
 api_hash = os.getenv('API_HASH')
@@ -16,135 +29,146 @@ with open('config.json', 'r') as f:
 
 DESTINATION_CHAT_ID = config['destination_id']
 TOPIC_MAP = {int(k): v for k, v in config['topics'].items()}
+SESSION_NAME = 'local_test'
 
-SESSION_NAME = 'local_test' # Change to 'crypto_session' for EC2
+# --- REGEX ---
+ALL_PATTERNS = r'(?:dexscreener\.com\/[\w-]+\/)?([1-9A-HJ-NP-Za-km-z]{32,44}|0x[a-fA-F0-9]{40})'
 
-# --- UPDATED REGEX ---
-# 1. Strict patterns for raw text (prevents false positives)
-SOL_REGEX = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
-EVM_REGEX = r'0x[a-fA-F0-9]{40}'
-
-# 2. permissive pattern specifically for URLs (Captures the address part)
-# Matches: dexscreener.com/solana/AnyStringHere
-DEX_URL_REGEX = r'dexscreener\.com\/[\w-]+\/([a-zA-Z0-9]+)'
-
+# --- INIT ---
+conn = get_connection()
 client = TelegramClient(SESSION_NAME, api_id, api_hash)
 
-def get_token_info(input_address):
-    try:
-        # Use Search API to handle both Pairs and Tokens
-        url = f"https://api.dexscreener.com/latest/dex/search?q={input_address}"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        
-        if not data.get('pairs'):
-            return None, None
-            
-        pair = data['pairs'][0]
-        real_ca = pair['baseToken']['address']
-        
-        symbol = pair['baseToken']['symbol']
-        price = float(pair.get('priceUsd', 0) or 0)
-        fdv = pair.get('fdv', 0)
-        liquidity = pair.get('liquidity', {}).get('usd', 0)
-        vol_5m = pair.get('volume', {}).get('m5', 0)
-        
-        def human_format(num):
-            num = float(num)
-            if num >= 1_000_000:
-                return f"${num/1_000_000:.1f}M"
-            if num >= 1_000:
-                return f"${num/1_000:.1f}K"
-            return f"${num:.0f}"
-
-        info_line = (
-            f"💎 **{symbol}** (${price:.4f})\n"
-            f"💰 **MC:** {human_format(fdv)}  |  "
-            f"💧 **Liq:** {human_format(liquidity)}  |  "
-            f"📊 **Vol(5m):** {human_format(vol_5m)}"
-        )
-        return info_line, real_ca
-
-    except Exception as e:
-        print(f"⚠️ API Error: {e}")
-        return None, None
-
-print(f"🚀 Bot running. URL Detection Fixed.")
+print("🚀 Smart Forwarder V2 Running...")
 
 @client.on(events.NewMessage(chats=list(TOPIC_MAP.keys())))
 async def handler(event):
     source_id = event.chat_id
     topic_id = TOPIC_MAP.get(source_id)
+    msg_text = event.raw_text or ""
 
-    if not topic_id:
+    # --- Reply context ---
+    reply_context = ""
+    if event.is_reply:
+        try:
+            reply_msg = await event.get_reply_message()
+            if reply_msg and reply_msg.text:
+                reply_context = f"\n\n↩️ **Replied to:**\n_{reply_msg.text[:400]}_"
+        except:
+            pass
+
+    # --- Find tokens ---
+    found_tokens = set(re.findall(ALL_PATTERNS, msg_text))
+
+    if not found_tokens:
+        try:
+            await client.send_message(DESTINATION_CHAT_ID, event.message, reply_to=topic_id)
+            print(f"📨 Copied non-token msg from {source_id}")
+        except Exception as e:
+            print(f"⚠️ Copy Error: {e}")
         return
 
-    msg_text = event.raw_text or ""
-    
-    # --- SEARCH PRIORITY ---
-    detected_address = None
-    
-    # 1. Check for DexScreener Link FIRST (Most accurate)
-    url_match = re.search(DEX_URL_REGEX, msg_text)
-    
-    if url_match:
-        # group(1) is the part AFTER the slash
-        detected_address = url_match.group(1)
-        print(f"🔗 Found URL Address: {detected_address}")
-        
-    else:
-        # 2. If no URL, check for Raw Addresses
-        sol_match = re.search(SOL_REGEX, msg_text)
-        evm_match = re.search(EVM_REGEX, msg_text)
-        
-        if sol_match:
-            detected_address = sol_match.group()
-        elif evm_match:
-            detected_address = evm_match.group()
-
-    # BRANCH A: Address Detected
-    if detected_address:
-        try:
-            print(f"🔍 Processing: {detected_address}...")
-            
-            market_data, real_ca = get_token_info(detected_address)
-            
-            # Fallback if API fails
-            final_ca = real_ca if real_ca else detected_address
-            header = market_data if market_data else f"**CA:** `{final_ca}`"
-
-            maestro_link = f"https://t.me/MaestroSniperBot?start={final_ca}"
-            dex_link = f"https://dexscreener.com/search?q={final_ca}"
-            
-            new_text = (
-                f"{msg_text}\n\n"
-                f"{header}\n"
-                f"`{final_ca}`\n\n"
-                f"🚀 [Buy on Maestro]({maestro_link})  |  📊 [DexScreener]({dex_link})"
-            )
-
-            # Media Filter (Block Link Previews)
-            media_to_send = event.media
-            if isinstance(media_to_send, MessageMediaWebPage):
-                media_to_send = None
-
-            await client.send_message(
-                DESTINATION_CHAT_ID,
-                new_text,
-                file=media_to_send,
-                reply_to=topic_id,
-                link_preview=False 
-            )
-            return
-            
-        except Exception as e:
-            print(f"⚠️ Error in custom flow: {e}")
-
-    # BRANCH B: Standard Forward
+    # --- Get channel name ---
     try:
-        await client.forward_messages(DESTINATION_CHAT_ID, event.message, reply_to=topic_id)
+        entity = await client.get_entity(source_id)
+        ch_name = entity.title
     except:
-        await client.send_message(DESTINATION_CHAT_ID, event.message, reply_to=topic_id)
+        ch_name = f"ID_{source_id}"
+
+    # --- Process each token ---
+    for ca in found_tokens:
+        try:
+            # 1. DEXSCREENER: Get banner, logo, socials (lightweight)
+            dex_data = search_token(ca)
+            if not dex_data:
+                continue
+
+            final_ca = dex_data['real_ca']
+
+            # 2. SOLANA TRACKER: Get FULL token data (~55 fields)
+            st_data = get_full_token_data(final_ca)
+
+            # 3. MERGE: Solana Tracker is primary, DexScreener adds media/socials/1h volume
+            call_data = {
+                **st_data,           # All 55 fields from Solana Tracker
+                'ca': final_ca,      # Ensure correct CA
+                'real_ca': final_ca,
+                'channel_id': source_id,
+                'channel_name': ch_name,
+                # DexScreener-only fields (media + socials)
+                'banner': dex_data.get('banner'),
+                'logo': dex_data.get('logo'),
+                'websites': dex_data.get('websites', []),
+                'socials': dex_data.get('socials', []),
+                # DexScreener provides the 1h volume breakdown
+                'vol_h1': dex_data.get('vol_h1', 0),
+                'vol_mcap_ratio': dex_data.get('vol_mcap_ratio', 0), # This is 1h ratio from DexScreener
+            }
+
+            # Use DexScreener price/mcap as fallback if Solana Tracker returned 0
+            if call_data['price'] == 0 and dex_data['price'] > 0:
+                call_data['price'] = dex_data['price']
+                call_data['mcap'] = dex_data['mcap']
+                call_data['liquidity'] = dex_data['liquidity']
+
+            # 4. DB: Insert with all enriched data
+            call_tag = insert_call(conn, call_data)
+            if not call_tag:
+                continue
+
+            # 5. FORMAT: Build message
+            final_msg = build_call_message(
+                call_tag, ch_name, call_data,
+                original_text=msg_text, reply_context=reply_context
+            )
+
+            # 6. SEND: Forward with media
+            media_files = []
+            if event.media and not isinstance(event.media, MessageMediaWebPage):
+                media_files.append(event.media)
+            if call_data.get('banner'):
+                media_files.append(call_data['banner'])
+            if call_data.get('logo'):
+                media_files.append(call_data['logo'])
+
+            if media_files:
+                try:
+                    await client.send_message(
+                        DESTINATION_CHAT_ID, final_msg,
+                        file=media_files if len(media_files) > 1 else media_files[0],
+                        reply_to=topic_id, link_preview=False
+                    )
+                    print(f"✅ {call_data['symbol']} from {ch_name} | "
+                          f"Risk:{call_data['risk_score']} Bundlers:{call_data['bundler_count']} "
+                          f"Holders:{call_data['holders']} ({len(media_files)} media)")
+                except Exception as e:
+                    print(f"⚠️ Album failed: {e}, fallback")
+                    try:
+                        sent_msg = await client.send_message(
+                            DESTINATION_CHAT_ID, final_msg,
+                            file=media_files[0], reply_to=topic_id, link_preview=False
+                        )
+                        for media in media_files[1:]:
+                            try:
+                                await client.send_message(
+                                    DESTINATION_CHAT_ID, file=media,
+                                    reply_to=sent_msg.id, link_preview=False
+                                )
+                            except:
+                                pass
+                    except:
+                        await client.send_message(
+                            DESTINATION_CHAT_ID, final_msg,
+                            reply_to=topic_id, link_preview=False
+                        )
+            else:
+                await client.send_message(
+                    DESTINATION_CHAT_ID, final_msg,
+                    reply_to=topic_id, link_preview=False
+                )
+                print(f"✅ {call_data['symbol']} from {ch_name} (text only)")
+
+        except Exception as e:
+            print(f"⚠️ Handler Error: {e}")
 
 with client:
     client.run_until_disconnected()

@@ -1,0 +1,6 @@
+telethon
+pandas
+python-dotenv
+requests
+gspread
+google-auth
