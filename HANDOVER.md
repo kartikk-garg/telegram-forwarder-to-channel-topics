@@ -306,8 +306,52 @@ sudo systemctl start crypto-forwarder
 
 ---
 
+## 🔧 Production Hardening (V3)
+
+### 1. SQLite WAL Mode (Concurrency Fix)
+Running `forwarder.py` and `watcher.py` concurrently causes `database is locked` errors under load. WAL mode fixes this:
+```python
+# Automatically enabled in get_connection()
+conn.execute("PRAGMA journal_mode=WAL")
+conn.execute("PRAGMA synchronous=NORMAL")
+conn.execute("PRAGMA cache_size=10000")
+```
+**After deploying**, run the V3 migration to enable WAL permanently:
+```bash
+python db_upgrade.py
+```
+
+### 2. Watcher Crash Recovery
+The watcher now records `last_checked_at` per row. On restart, it resumes efficiently instead of re-checking everything:
+- **`last_checked_at`**: Unix timestamp of last successful price check.
+- **`check_failures`**: Incremented on API errors for that token.
+- On restart, only tokens not checked in the last 60 seconds are re-queried.
+
+### 3. Peak Timing Analytics
+The watcher now tracks **when** peaks happen (not just the value):
+- **`peak_hit_at`**: Unix timestamp when the highest price was recorded.
+- **`time_to_peak_hours`**: Hours from call entry to peak.
+- **`time_to_2x_hours`**: Hours to first reach 2x (null if never). This is your most valuable AI training feature.
+
+### 4. Idempotent Google Sheets Sync
+`export_to_sheets.py` now uses a cursor (`last_sheet_sync_row_id` in the `settings` table).
+- **Default**: Incremental sync (only new rows since last export).
+- **Full re-sync**: `python execution/export_to_sheets.py --full`
+
+### 5. Message Metadata Capture
+The forwarder now stores the raw Telegram message and extracts structured metadata for AI training:
+| Column | Purpose |
+|---|---|
+| `raw_message_text` | Full original message for retroactive AI scoring |
+| `message_has_tweet_link` | Boolean: contains twitter.com or x.com |
+| `extracted_tweet_url` | First detected tweet URL |
+| `message_has_media` | Boolean: has attached images/video |
+
+---
+
 ## ⚠️ Known Issues & Tips
 
 1.  **Telethon Media**: Sending many images at once can sometimes trigger a `MediaInvalid` or Flood error. The `forwarder.py` has a fallback logic to switch to text-only if the album fails.
 2.  **API Rate Limits**: Solana Tracker is sensitive. The client includes 3-second sleep buffers on 429 errors.
 3.  **DexScreener Lag**: Prices can be 30-60s behind on-chain events. Use Solana Tracker for high-frequency pricing if needed.
+

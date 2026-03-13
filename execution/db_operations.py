@@ -21,8 +21,12 @@ DEFAULT_DB = "crypto_data.db"
 # ---------------------------------------------------------------------------
 
 def get_connection(db_name=DEFAULT_DB):
-    """Returns a SQLite connection."""
-    return sqlite3.connect(db_name, check_same_thread=False, timeout=30)
+    """Returns a WAL-mode SQLite connection for safe concurrency."""
+    conn = sqlite3.connect(db_name, check_same_thread=False, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=10000")
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +62,10 @@ INSERT_COLUMNS = [
     'fees_total_trading', 'fees_total_tips',
     # Computed
     'total_liquidity_usd', 'is_multi_pool',
+    # Message metadata (V3)
+    'raw_message_text', 'forwarded_from_name',
+    'message_has_media', 'message_has_tweet_link',
+    'message_has_external_link', 'extracted_tweet_url',
     # Tracking fields
     'max_price', 'current_price', 'is_active',
 ]
@@ -142,6 +150,10 @@ def insert_call(conn, data):
             data.get('fees_total_trading', 0), data.get('fees_total_tips', 0),
             # Computed
             data.get('total_liquidity_usd', 0), data.get('is_multi_pool', 0),
+            # Message metadata (V3)
+            data.get('raw_message_text', ''), data.get('forwarded_from_name', ''),
+            data.get('message_has_media', 0), data.get('message_has_tweet_link', 0),
+            data.get('message_has_external_link', 0), data.get('extracted_tweet_url', ''),
             # Tracking
             price, price, 1,  # max_price, current_price, is_active
         ]
@@ -185,12 +197,17 @@ def get_active_calls(conn, table_name, age_filter="all"):
 # ---------------------------------------------------------------------------
 
 def update_prices(conn, table_name, updates):
-    """Batch updates price data for tracked calls."""
+    """
+    Batch updates price data for tracked calls.
+    Each update tuple: (current_price, max_price, peak_multiplier, is_rug, is_active,
+                        last_checked_at, peak_hit_at, time_to_peak_hours, time_to_2x_hours, id)
+    """
     if not updates:
         return 0
     conn.executemany(f"""
         UPDATE {table_name}
-        SET current_price=?, max_price=?, peak_multiplier=?, is_rug=?, is_active=?
+        SET current_price=?, max_price=?, peak_multiplier=?, is_rug=?, is_active=?,
+            last_checked_at=?, peak_hit_at=?, time_to_peak_hours=?, time_to_2x_hours=?
         WHERE id=?
     """, updates)
     logging.info(f"✅ Updated {len(updates)} rows in '{table_name}'")
@@ -202,11 +219,16 @@ def update_prices(conn, table_name, updates):
 # ---------------------------------------------------------------------------
 
 def get_leaderboard(conn, days=7, limit=15):
-    """Returns leaderboard data for the weekly report."""
+    """Returns enhanced leaderboard data for the weekly report."""
     query = f"""
-    SELECT channel_name, COUNT(*) as total, SUM(is_rug) as rugs,
-           AVG(peak_multiplier) as avg_x, MAX(peak_multiplier) as best_x,
-           SUM(CASE WHEN peak_multiplier > 2 THEN 1 ELSE 0 END) as wins
+    SELECT channel_name,
+           COUNT(*) as total,
+           SUM(is_rug) as rugs,
+           AVG(peak_multiplier) as avg_x,
+           MAX(peak_multiplier) as best_x,
+           SUM(CASE WHEN peak_multiplier > 2 THEN 1 ELSE 0 END) as wins,
+           AVG(time_to_2x_hours) as avg_speed_to_2x,
+           COUNT(*) * 1.0 / {days} as calls_per_day
     FROM calls WHERE timestamp >= datetime('now', '-{days} days')
     GROUP BY channel_name HAVING total > 0
     ORDER BY wins DESC, avg_x DESC LIMIT {limit}
@@ -214,6 +236,20 @@ def get_leaderboard(conn, days=7, limit=15):
     cursor = conn.execute(query)
     columns = [d[0] for d in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def get_best_call(conn, days=7):
+    """Returns the single best call of the week."""
+    query = f"""
+    SELECT symbol, ca, channel_name, peak_multiplier, time_to_peak_hours,
+           entry_mcap, risk_score
+    FROM calls WHERE timestamp >= datetime('now', '-{days} days')
+    ORDER BY peak_multiplier DESC LIMIT 1
+    """
+    cursor = conn.execute(query)
+    columns = [d[0] for d in cursor.description]
+    row = cursor.fetchone()
+    return dict(zip(columns, row)) if row else None
 
 
 # ---------------------------------------------------------------------------

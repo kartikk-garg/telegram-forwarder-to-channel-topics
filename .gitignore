@@ -19,3 +19,8 @@ env/
 # --- Bot Logs & Data ---
 *.log
 crypto_data.db        
+
+# --- Tests ---
+test_*.py
+test.md
+test_output.txt

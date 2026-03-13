@@ -210,8 +210,8 @@ def build_call_message(call_tag, ch_name, token_data, original_text="", reply_co
 # Report Message
 # ---------------------------------------------------------------------------
 
-def build_report_message(leaderboard_rows):
-    """Builds the weekly leaderboard report."""
+def build_report_message(leaderboard_rows, best_call=None):
+    """Builds the enhanced weekly leaderboard report."""
     if not leaderboard_rows:
         return "⚠️ **Weekly Report:** Not enough data collected yet."
     
@@ -221,11 +221,34 @@ def build_report_message(leaderboard_rows):
         wins = row['wins']
         win_pct = int(wins / total * 100) if total > 0 else 0
         best_x = round(row.get('best_x', 0) or 0, 1)
-        lines.append(f"• **{row['channel_name']}**: {total} calls | {win_pct}% win | {best_x}x peak")
+        calls_day = round(row.get('calls_per_day', 0) or 0, 1)
+        speed = row.get('avg_speed_to_2x')
+        speed_str = f"{speed:.1f}h" if speed else "—"
         
-    return (
+        lines.append(
+            f"• **{row['channel_name']}**: {total} calls ({calls_day}/day) | "
+            f"{win_pct}% win | {best_x}x peak | ⚡{speed_str}"
+        )
+    
+    report = (
         f"📊 **Weekly Alpha Leaderboard**\n"
         f"Last 7 days of performance\n\n"
         + "\n".join(lines) +
-        f"\n\n_Wins = Calls hitting > 2x peak multiplier._"
+        f"\n\n_Wins = Calls hitting > 2x | ⚡ = Avg time to 2x_"
     )
+
+    # Best Call of the Week highlight
+    if best_call:
+        bc_sym = best_call.get('symbol', '?')
+        bc_peak = round(best_call.get('peak_multiplier', 0) or 0, 1)
+        bc_ch = best_call.get('channel_name', '?')
+        bc_time = best_call.get('time_to_peak_hours')
+        bc_time_str = f" in {bc_time:.1f}h" if bc_time else ""
+        bc_risk = best_call.get('risk_score', '?')
+        report += (
+            f"\n\n🏆 **Best Call:** ${bc_sym} ({bc_peak}x{bc_time_str}) "
+            f"from {bc_ch} | Risk: {bc_risk}/10"
+        )
+
+    return report
+

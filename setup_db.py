@@ -8,9 +8,10 @@ import sqlite3
 
 DB_NAME = "crypto_data.db"
 
-def setup_database():
-    print(f"🔧 Initializing {DB_NAME} with V2 Schema (81 columns)...")
-    conn = sqlite3.connect(DB_NAME)
+def setup_database(db_name=None):
+    db = db_name or DB_NAME
+    print(f"🔧 Initializing {db} with V3 Schema (92 columns)...")
+    conn = sqlite3.connect(db)
     c = conn.cursor()
 
     # Shared column definition for calls and re_entries
@@ -108,7 +109,24 @@ def setup_database():
         max_price REAL DEFAULT 0,
         peak_multiplier REAL DEFAULT 0,
         is_active INTEGER DEFAULT 1,
-        is_rug INTEGER DEFAULT 0
+        is_rug INTEGER DEFAULT 0,
+        
+        -- V3: Message Metadata
+        raw_message_text TEXT DEFAULT '',
+        forwarded_from_name TEXT DEFAULT '',
+        message_has_media INTEGER DEFAULT 0,
+        message_has_tweet_link INTEGER DEFAULT 0,
+        message_has_external_link INTEGER DEFAULT 0,
+        extracted_tweet_url TEXT DEFAULT '',
+        
+        -- V3: Watcher Crash Recovery
+        last_checked_at INTEGER DEFAULT 0,
+        check_failures INTEGER DEFAULT 0,
+        
+        -- V3: Peak Timing
+        peak_hit_at INTEGER DEFAULT 0,
+        time_to_peak_hours REAL,
+        time_to_2x_hours REAL
     """
 
     # 1. Calls Table
@@ -152,6 +170,9 @@ def setup_database():
     conn.commit()
     conn.close()
     print("\n🚀 Setup Complete. Use db_upgrade.py if you have an existing old DB.")
+
+# Alias for test compatibility
+create_tables = setup_database
 
 if __name__ == "__main__":
     setup_database()

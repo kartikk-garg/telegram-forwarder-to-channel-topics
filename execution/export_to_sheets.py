@@ -1,7 +1,7 @@
 """
-Google Sheets Exporter
-Exports all DB tables to Google Sheets — one tab per table.
-Handles auth via service account (credentials.json in project root).
+Google Sheets Exporter — V3 (Idempotent Cursor-Based Sync)
+Exports new DB rows to Google Sheets since last sync.
+Uses settings.last_sheet_sync_row_id as a cursor to avoid duplicates.
 
 Setup:
     1. Go to console.cloud.google.com
@@ -12,7 +12,8 @@ Setup:
     pip install gspread google-auth
 
 Usage:
-    python execution/export_to_sheets.py
+    python execution/export_to_sheets.py            # Incremental sync
+    python execution/export_to_sheets.py --full      # Full re-sync
 """
 
 import os
@@ -64,24 +65,50 @@ def get_sheets_client():
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def fetch_table(table_name):
+def fetch_table(table_name, since_id=0):
     """
-    Fetches all rows + column headers from a DB table.
+    Fetches rows from a DB table, optionally only newer than since_id.
 
     Returns:
-        (headers: list[str], rows: list[list]) or ([], []) on error
+        (headers: list[str], rows: list[list], max_id: int) or ([], [], 0) on error
     """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM {table_name} ORDER BY id DESC")
+        if since_id > 0:
+            cursor.execute(f"SELECT * FROM {table_name} WHERE id > ? ORDER BY id ASC", (since_id,))
+        else:
+            cursor.execute(f"SELECT * FROM {table_name} ORDER BY id ASC")
         rows = cursor.fetchall()
         headers = [d[0] for d in cursor.description]
+        max_id = max(r[0] for r in rows) if rows else since_id
         conn.close()
-        return headers, [list(r) for r in rows]
+        return headers, [list(r) for r in rows], max_id
     except Exception as e:
         logging.error(f"❌ Failed to fetch {table_name}: {e}")
-        return [], []
+        return [], [], 0
+
+
+def get_sync_cursor():
+    """Reads last_sheet_sync_row_id from settings."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        row = conn.execute("SELECT value FROM settings WHERE key='last_sheet_sync_row_id'").fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+    except:
+        return 0
+
+
+def set_sync_cursor(row_id):
+    """Updates last_sheet_sync_row_id in settings."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_sheet_sync_row_id', ?)", (str(row_id),))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"❌ Failed to update sync cursor: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -100,18 +127,14 @@ def ensure_tab(spreadsheet, tab_name):
         return spreadsheet.add_worksheet(title=tab_name, rows=2000, cols=30)
 
 
-def write_tab(ws, headers, rows):
+def write_tab(ws, headers, rows, append=False):
     """
-    Clears and rewrites a worksheet with headers + data.
+    Writes headers + data to a worksheet.
+    If append=True, appends rows after existing data.
     """
-    ws.clear()
-
-    # Build all data: header row first then data rows
-    all_data = [headers] + rows
-
-    # Format None values and datetimes
+    # Format None values
     cleaned = []
-    for row in all_data:
+    for row in ([headers] if not append else []) + rows:
         cleaned_row = []
         for cell in row:
             if cell is None:
@@ -120,22 +143,28 @@ def write_tab(ws, headers, rows):
                 cleaned_row.append(str(cell))
         cleaned.append(cleaned_row)
 
-    if cleaned:
+    if not cleaned:
+        return
+
+    if append:
+        ws.append_rows(cleaned, value_input_option='RAW')
+    else:
+        ws.clear()
         ws.update("A1", cleaned)
-        # Bold the header row
         ws.format("1:1", {"textFormat": {"bold": True}})
 
-    logging.info(f"✅ Wrote {len(rows)} rows to tab '{ws.title}'")
+    logging.info(f"✅ {'Appended' if append else 'Wrote'} {len(rows)} rows to tab '{ws.title}'")
 
 
 # ---------------------------------------------------------------------------
 # Main export function
 # ---------------------------------------------------------------------------
 
-def export_all_tables():
+def export_all_tables(full_sync=False):
     """
-    Exports all tables from the DB to Google Sheets.
-    Each table → its own tab. Also writes a summary tab.
+    Exports tables from the DB to Google Sheets.
+    Uses cursor-based sync by default (only new rows).
+    Pass full_sync=True for a complete re-export.
     """
     if not SHEET_ID:
         raise ValueError("GOOGLE_SHEET_ID not set in .env")
@@ -146,19 +175,38 @@ def export_all_tables():
     logging.info(f"📊 Opening spreadsheet {SHEET_ID[:10]}...")
     spreadsheet = gc.open_by_key(SHEET_ID)
 
+    since_id = 0 if full_sync else get_sync_cursor()
+    mode_str = "FULL" if full_sync else f"INCREMENTAL (since id={since_id})"
+    logging.info(f"🔄 Sync mode: {mode_str}")
+
     # Export each table
     total_rows = 0
+    max_id_seen = since_id
     for table_name, tab_name in TABLES:
         logging.info(f"📦 Exporting {table_name}...")
-        headers, rows = fetch_table(table_name)
+        headers, rows, max_id = fetch_table(table_name, since_id=0 if full_sync else since_id)
 
         if not headers:
             logging.warning(f"⚠️ Skipping {table_name} (empty or error)")
             continue
 
         ws = ensure_tab(spreadsheet, tab_name)
-        write_tab(ws, headers, rows)
+
+        if full_sync or since_id == 0:
+            write_tab(ws, headers, rows, append=False)
+        else:
+            if rows:
+                write_tab(ws, headers, rows, append=True)
+            else:
+                logging.info(f"  No new rows in {table_name}")
+
         total_rows += len(rows)
+        max_id_seen = max(max_id_seen, max_id)
+
+    # Update cursor
+    if max_id_seen > since_id:
+        set_sync_cursor(max_id_seen)
+        logging.info(f"📌 Sync cursor updated to id={max_id_seen}")
 
     # Write a summary/meta tab
     _write_summary_tab(spreadsheet, total_rows)
@@ -211,8 +259,9 @@ if __name__ == "__main__":
         print("❌ GOOGLE_SHEET_ID not set in .env")
         sys.exit(1)
 
+    full = "--full" in sys.argv
     try:
-        url = export_all_tables()
+        url = export_all_tables(full_sync=full)
         print(f"\n✅ Done! View at: {url}")
     except Exception as e:
         print(f"\n❌ Export failed: {e}")

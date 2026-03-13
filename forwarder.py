@@ -33,6 +33,8 @@ SESSION_NAME = 'local_test'
 
 # --- REGEX ---
 ALL_PATTERNS = r'(?:dexscreener\.com\/[\w-]+\/)?([1-9A-HJ-NP-Za-km-z]{32,44}|0x[a-fA-F0-9]{40})'
+TWEET_PATTERN = r'https?://(?:twitter\.com|x\.com)/\S+'
+URL_PATTERN = r'https?://\S+'
 
 # --- INIT ---
 conn = get_connection()
@@ -101,7 +103,14 @@ async def handler(event):
                 'socials': dex_data.get('socials', []),
                 # DexScreener provides the 1h volume breakdown
                 'vol_h1': dex_data.get('vol_h1', 0),
-                'vol_mcap_ratio': dex_data.get('vol_mcap_ratio', 0), # This is 1h ratio from DexScreener
+                'vol_mcap_ratio': dex_data.get('vol_mcap_ratio', 0),
+                # Message metadata (V3)
+                'raw_message_text': msg_text[:2000],  # Cap at 2000 chars
+                'forwarded_from_name': ch_name,
+                'message_has_media': 1 if event.media and not isinstance(event.media, MessageMediaWebPage) else 0,
+                'message_has_tweet_link': 1 if re.search(TWEET_PATTERN, msg_text) else 0,
+                'message_has_external_link': 1 if re.search(URL_PATTERN, msg_text) else 0,
+                'extracted_tweet_url': (lambda m: m.group(0) if m else '')(re.search(TWEET_PATTERN, msg_text)),
             }
 
             # Use DexScreener price/mcap as fallback if Solana Tracker returned 0

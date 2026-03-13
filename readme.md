@@ -60,7 +60,10 @@ The bot generates high-fidelity, clean Telegram messages with:
 ---
 
 ## 🛠 Maintenance & Deployment
-The project is optimized for **Ubuntu** and **Oracle Linux (RHEL)**. It includes pre-configured `systemd` service templates for 24/7 persistent operation on VPCs.
+The project is optimized for **Ubuntu** and **Oracle Linux (RHEL)**. It includes pre-configured `systemd` service templates for 24/7 persistent operation. 
+
+> [!IMPORTANT]
+> **Security First**: The `HANDOVER.md` now includes a **Secured Firewall Policy** specifically for Oracle Cloud. Do NOT leave your ports wide open!
 
 ---
 *Created by Antigravity AI for Kartikk's Crypto Arsenal.*
